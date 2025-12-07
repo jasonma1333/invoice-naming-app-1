@@ -1,153 +1,174 @@
-"""
-HSBC Payment Advice PDF 重命名 Web 應用 - Vercel Serverless Function
-提供網頁介面上傳 PDF、輸入年份和期間代碼,並下載重新命名的檔案
-"""
-
 from flask import Flask, request, send_file, jsonify, render_template
 import os
 import sys
 import tempfile
 import zipfile
 from werkzeug.utils import secure_filename
-import fitz  # PyMuPDF
 
-# 添加父目錄到 Python 路徑以導入 hsbc_payment_renamer
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, BASE_DIR)
-from hsbc_payment_renamer import HSBCPaymentAdviceRenamer
+# 修復導入路徑
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
-# Vercel 環境中的路徑配置
-template_dir = os.path.join(BASE_DIR, 'templates')
-app = Flask(__name__, template_folder=template_dir)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload
+try:
+    from hsbc_payment_renamer import HSBCPaymentAdviceRenamer
+except ImportError:
+    # 如果導入失敗,定義一個簡單版本
+    import re
+    import fitz
+    
+    class HSBCPaymentAdviceRenamer:
+        def __init__(self):
+            self.pattern = re.compile(r"(\d{10,})\s*/\s*([A-Z]{3})\s*-?\s*([A-Z0-9]+)")
+        
+        def extract_pdf_info(self, pdf_path):
+            try:
+                doc = fitz.open(pdf_path)
+                text = ""
+                for page_num in range(min(3, len(doc))):
+                    text += doc.load_page(page_num).get_text()
+                doc.close()
+                
+                match = self.pattern.search(text)
+                if match:
+                    outlet_num = match.group(1)
+                    bene_abbr = match.group(2)
+                    outlet_code = match.group(3)
+                    return {
+                        'outlet_num': outlet_num,
+                        'bene_abbr': bene_abbr,
+                        'outlet_code': outlet_code
+                    }
+                return None
+            except Exception:
+                return None
+        
+        def generate_new_filename(self, info, period_code):
+            from datetime import datetime
+            year = datetime.now().strftime("%y")
+            period = period_code.upper().replace('P', '')
+            return f"{year}_P{period}_{info['bene_abbr']}_{info['outlet_code']}_{info['outlet_num']}.pdf"
+
+app = Flask(__name__, 
+            template_folder=os.path.join(parent_dir, 'templates'))
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+
 ALLOWED_EXTENSIONS = {"pdf"}
 
-def allowed_file(filename: str) -> bool:
+def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def detect_pdf_type(pdf_path: str) -> str:
-    """檢測 PDF 類型"""
-    try:
-        doc = fitz.open(pdf_path)
-        text = []
-        for i in range(min(2, len(doc))):
-            text.append(doc.load_page(i).get_text())
-        doc.close()
-        content = "\n".join(text).lower()
-        if any(k in content for k in ["hsbc", "payment advice", "payroll advice"]):
-            return "hsbc"
-        if any(k in content for k in ["invoice", "發票"]):
-            return "invoice"
-        return "unknown"
-    except Exception:
-        return "unknown"
 
 @app.route("/")
 def index():
-    """主頁 - 顯示上傳介面"""
     return render_template('index.html')
 
 @app.route("/health")
 def health():
-    """健康檢查"""
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "message": "Service is running"})
 
 @app.route("/upload", methods=["POST"])
-def upload_file():
-    """單檔上傳並重命名"""
+def upload():
     if "file" not in request.files:
-        return jsonify({"error": "未找到檔案"}), 400
+        return jsonify({"error": "缺少檔案欄位 file"}), 400
     
-    file = request.files["file"]
-    if file.filename == "":
+    f = request.files["file"]
+    if f.filename == "":
         return jsonify({"error": "未選擇檔案"}), 400
     
-    if not allowed_file(file.filename):
-        return jsonify({"error": "僅支援 PDF 檔案"}), 400
-    
-    period_code = request.form.get("period_code", "").strip().upper()
-    if not period_code:
-        return jsonify({"error": "請提供期間代碼"}), 400
-    
+    if not allowed_file(f.filename):
+        return jsonify({"error": "僅支援 PDF"}), 400
+
+    period_code = request.form.get("period_code", "P1").upper()
+    if not period_code.startswith('P'):
+        period_code = f"P{period_code}"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        f.save(tmp.name)
+        temp_path = tmp.name
+
     try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            original_path = os.path.join(temp_dir, secure_filename(file.filename))
-            file.save(original_path)
-            
-            pdf_type = detect_pdf_type(original_path)
-            if pdf_type != "hsbc":
-                return jsonify({"error": "此檔案不是 HSBC Payment Advice PDF"}), 400
-            
-            renamer = HSBCPaymentAdviceRenamer(period_code)
-            new_filename = renamer.rename_single_file(original_path, temp_dir)
-            
-            if not new_filename:
-                return jsonify({"error": "重命名失敗"}), 500
-            
-            new_path = os.path.join(temp_dir, new_filename)
-            return send_file(
-                new_path,
-                as_attachment=True,
-                download_name=new_filename,
-                mimetype="application/pdf"
-            )
-    
+        renamer = HSBCPaymentAdviceRenamer()
+        info = renamer.extract_pdf_info(temp_path)
+        
+        if info:
+            new_name = renamer.generate_new_filename(info, period_code)
+        else:
+            os.unlink(temp_path)
+            return jsonify({"error": "無法解析 PDF 內容"}), 400
+
+        if not new_name.endswith(".pdf"):
+            new_name += ".pdf"
+        
+        safe = secure_filename(new_name)
+        
+        return send_file(
+            temp_path, 
+            as_attachment=True, 
+            download_name=safe, 
+            mimetype="application/pdf"
+        )
     except Exception as e:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
         return jsonify({"error": f"處理失敗: {str(e)}"}), 500
 
 @app.route("/batch_upload", methods=["POST"])
 def batch_upload():
-    """批次上傳並重命名"""
-    if "files[]" not in request.files:
-        return jsonify({"error": "未找到檔案"}), 400
+    files = request.files.getlist('files')
     
-    files = request.files.getlist("files[]")
-    if not files or all(f.filename == "" for f in files):
-        return jsonify({"error": "未選擇檔案"}), 400
+    if not files or all(f.filename == '' for f in files):
+        return jsonify({"error": "沒有選擇檔案"}), 400
     
-    period_code = request.form.get("period_code", "").strip().upper()
-    if not period_code:
-        return jsonify({"error": "請提供期間代碼"}), 400
+    period_code = request.form.get("period_code", "P1").upper()
+    if not period_code.startswith('P'):
+        period_code = f"P{period_code}"
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as temp_zip:
+        zip_path = temp_zip.name
+    
+    processed_files = []
     
     try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            input_dir = os.path.join(temp_dir, "input")
-            output_dir = os.path.join(temp_dir, "output")
-            os.makedirs(input_dir)
-            os.makedirs(output_dir)
-            
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
             for file in files:
-                if file and allowed_file(file.filename):
-                    filename = secure_filename(file.filename)
-                    file.save(os.path.join(input_dir, filename))
-            
-            renamer = HSBCPaymentAdviceRenamer(period_code)
-            results = renamer.batch_rename(input_dir, output_dir)
-            
-            if results["success_count"] == 0:
-                return jsonify({"error": "沒有檔案被成功重命名"}), 400
-            
-            zip_path = os.path.join(temp_dir, "renamed_files.zip")
-            with zipfile.ZipFile(zip_path, "w") as zipf:
-                for filename in os.listdir(output_dir):
-                    file_path = os.path.join(output_dir, filename)
-                    zipf.write(file_path, filename)
-            
-            return send_file(
-                zip_path,
-                as_attachment=True,
-                download_name=f"renamed_files_{period_code}.zip",
-                mimetype="application/zip"
-            )
-    
+                if file.filename == '' or not allowed_file(file.filename):
+                    continue
+                
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                        file.save(temp_file.name)
+                        temp_path = temp_file.name
+                    
+                    renamer = HSBCPaymentAdviceRenamer()
+                    info = renamer.extract_pdf_info(temp_path)
+                    
+                    if info:
+                        new_name = renamer.generate_new_filename(info, period_code)
+                        if not new_name.endswith('.pdf'):
+                            new_name += '.pdf'
+                        safe_filename = secure_filename(new_name)
+                        
+                        zipf.write(temp_path, safe_filename)
+                        processed_files.append(safe_filename)
+                    
+                    os.unlink(temp_path)
+                except Exception:
+                    if 'temp_path' in locals() and os.path.exists(temp_path):
+                        os.unlink(temp_path)
+        
+        if not processed_files:
+            os.unlink(zip_path)
+            return jsonify({'error': '沒有成功處理任何檔案'}), 400
+        
+        return send_file(
+            zip_path,
+            as_attachment=True,
+            download_name='renamed_pdfs.zip',
+            mimetype='application/zip'
+        )
+        
     except Exception as e:
-        return jsonify({"error": f"批次處理失敗: {str(e)}"}), 500
-
-# Vercel serverless function handler
-def handler(request):
-    with app.request_context(request.environ):
-        return app.full_dispatch_request()
-
-# For local testing
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+        if os.path.exists(zip_path):
+            os.unlink(zip_path)
+        return jsonify({'error': f'批量處理失敗: {str(e)}'}), 500
