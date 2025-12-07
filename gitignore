@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel
+.vercel.json.backup
+
+# Test files and demos
+*_demo.py
+example.py
+complete_demo.py
+period_code_demo.py
+code-2.py
+
+# PDF files (don't commit uploaded files)
+*.pdf
+
+# Temporary files
+*.tmp
+*.log
+uploads/
+temp/

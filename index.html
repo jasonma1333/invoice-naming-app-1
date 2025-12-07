@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HSBC Payment Advice 重命名工具</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.98);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            font-weight: 600;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+        .settings-panel {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+        }
+        .settings-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .setting-group {
+            margin-bottom: 15px;
+        }
+        .setting-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #555;
+        }
+        .setting-input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1em;
+            transition: all 0.3s ease;
+        }
+        .setting-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        .upload-mode {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        .mode-btn {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        .mode-btn.active {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+        }
+        .mode-btn:hover:not(.active) {
+            background: rgba(102, 126, 234, 0.1);
+        }
+        .upload-area {
+            border: 3px dashed #ddd;
+            border-radius: 15px;
+            padding: 60px 20px;
+            text-align: center;
+            margin: 30px 0;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        .upload-area.dragover {
+            border-color: #667eea;
+            background: rgba(102, 126, 234, 0.1);
+            transform: scale(1.02);
+        }
+        .upload-icon { font-size: 4em; margin-bottom: 20px; }
+        .upload-text { color: #666; font-size: 1.2em; margin-bottom: 10px; }
+        .upload-hint { color: #999; font-size: 0.9em; }
+        .file-input { display: none; }
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .btn-primary {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .file-list {
+            margin: 30px 0;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .file-item {
+            background: white;
+            border: 2px solid #f0f0f0;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 15px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s ease;
+        }
+        .file-item:hover {
+            border-color: #667eea;
+            transform: translateX(5px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+        .file-info { flex: 1; }
+        .file-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 1.05em;
+        }
+        .file-size { color: #999; font-size: 0.9em; }
+        .file-status {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-left: 15px;
+        }
+        .status-waiting { background: #fff3cd; color: #856404; }
+        .status-processing { background: #d1ecf1; color: #0c5460; }
+        .status-success { background: #d4edda; color: #155724; }
+        .status-error { background: #f8d7da; color: #721c24; }
+        .remove-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 35px;
+            height: 35px;
+            cursor: pointer;
+            margin-left: 15px;
+            transition: all 0.3s ease;
+            font-size: 1.2em;
+        }
+        .remove-btn:hover {
+            background: #c82333;
+            transform: rotate(90deg);
+        }
+        .process-btn-container {
+            text-align: center;
+            margin: 30px 0;
+        }
+        .alert {
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            font-weight: 500;
+        }
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 2px solid #c3e6cb;
+        }
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 2px solid #f5c6cb;
+        }
+        .hidden { display: none; }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 2px solid #f0f0f0;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📄 HSBC Payment Advice 重命名工具</h1>
+        <p class="subtitle">自動提取 PDF 資訊並重新命名為標準格式</p>
+
+        <div class="settings-panel">
+            <div class="settings-title">⚙️ 設定</div>
+            <div class="setting-group">
+                <label class="setting-label" for="periodCode">期間代碼 (Period Code)</label>
+                <input type="text" id="periodCode" class="setting-input" placeholder="例如: P1, P8, P9" value="P8" maxlength="10">
+                <small style="color: #999; display: block; margin-top: 5px;">
+                    格式：P + 數字，例如 P1、P8、P9
+                </small>
+            </div>
+        </div>
+
+        <div class="upload-mode">
+            <button class="mode-btn active" data-mode="single" onclick="switchMode('single')">📄 單檔上傳</button>
+            <button class="mode-btn" data-mode="batch" onclick="switchMode('batch')">📁 批量上傳</button>
+        </div>
+
+        <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+            <div class="upload-icon">☁️</div>
+            <div class="upload-text">點擊上傳或拖放檔案到此處</div>
+            <div class="upload-hint" id="uploadHint">支援 PDF 檔案</div>
+        </div>
+
+        <input type="file" id="fileInput" class="file-input" accept=".pdf" onchange="handleFileSelect(event)">
+
+        <div id="fileList" class="file-list hidden"></div>
+
+        <div class="process-btn-container hidden" id="processContainer">
+            <button class="btn btn-primary" id="processBtn" onclick="processFiles()">
+                <span id="processBtnText">開始處理</span>
+            </button>
+        </div>
+
+        <div id="alertContainer"></div>
+
+        <div class="footer">
+            <p>命名格式: YY_PX_BENE_CODE_OUTLETNUM.pdf</p>
+            <p style="margin-top: 5px; font-size: 0.9em;">例如: 25_P8_APC_IT801_1208008138.pdf</p>
+        </div>
+    </div>
+
+    <script>
+        let uploadedFiles = [];
+        let currentMode = 'single';
+
+        function switchMode(mode) {
+            currentMode = mode;
+            document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelector(`[data-mode="${mode}"]`).classList.add('active');
+            
+            const fileInput = document.getElementById('fileInput');
+            const uploadHint = document.getElementById('uploadHint');
+            
+            if (mode === 'batch') {
+                fileInput.multiple = true;
+                uploadHint.textContent = '支援 PDF 檔案 (可多選)';
+            } else {
+                fileInput.multiple = false;
+                uploadHint.textContent = '支援 PDF 檔案';
+            }
+            uploadedFiles = [];
+            updateFileList();
+        }
+
+        const uploadArea = document.getElementById('uploadArea');
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.pdf'));
+            uploadedFiles = currentMode === 'single' && files.length > 0 ? [files[0]] : files;
+            updateFileList();
+        });
+
+        function handleFileSelect(event) {
+            const files = Array.from(event.target.files);
+            uploadedFiles = currentMode === 'single' && files.length > 0 ? [files[0]] : files;
+            updateFileList();
+        }
+
+        function updateFileList() {
+            const fileList = document.getElementById('fileList');
+            const processContainer = document.getElementById('processContainer');
+            
+            if (uploadedFiles.length === 0) {
+                fileList.classList.add('hidden');
+                processContainer.classList.add('hidden');
+                return;
+            }
+            
+            fileList.classList.remove('hidden');
+            processContainer.classList.remove('hidden');
+            fileList.innerHTML = uploadedFiles.map((file, index) => `
+                <div class="file-item">
+                    <div class="file-info">
+                        <div class="file-name">${file.name}</div>
+                        <div class="file-size">${formatFileSize(file.size)}</div>
+                    </div>
+                    <span class="file-status status-waiting">等待處理</span>
+                    <button class="remove-btn" onclick="removeFile(${index})">×</button>
+                </div>
+            `).join('');
+        }
+
+        function removeFile(index) {
+            uploadedFiles.splice(index, 1);
+            updateFileList();
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        function showAlert(message, type) {
+            const alertContainer = document.getElementById('alertContainer');
+            alertContainer.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+            setTimeout(() => alertContainer.innerHTML = '', 5000);
+        }
+
+        async function processFiles() {
+            if (uploadedFiles.length === 0) return;
+            
+            const periodCode = document.getElementById('periodCode').value.trim();
+            if (!periodCode) {
+                showAlert('請輸入期間代碼', 'error');
+                return;
+            }
+
+            const processBtn = document.getElementById('processBtn');
+            const processBtnText = document.getElementById('processBtnText');
+            processBtn.disabled = true;
+            processBtnText.innerHTML = '<span class="loading"></span> 處理中...';
+
+            try {
+                if (currentMode === 'single') {
+                    await processSingleFile(uploadedFiles[0], periodCode);
+                } else {
+                    await processBatchFiles(uploadedFiles, periodCode);
+                }
+            } catch (error) {
+                showAlert('處理檔案時發生錯誤: ' + error.message, 'error');
+            } finally {
+                processBtn.disabled = false;
+                processBtnText.textContent = '開始處理';
+            }
+        }
+
+        async function processSingleFile(file, periodCode) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('period_code', periodCode);
+
+            const response = await fetch('/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || '處理失敗');
+            }
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const contentDisposition = response.headers.get('Content-Disposition');
+            const filename = contentDisposition ? contentDisposition.split('filename=')[1].replace(/"/g, '') : 'renamed.pdf';
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+
+            showAlert(`✅ 檔案已成功重命名並下載: ${filename}`, 'success');
+            uploadedFiles = [];
+            updateFileList();
+        }
+
+        async function processBatchFiles(files, periodCode) {
+            const formData = new FormData();
+            files.forEach(file => formData.append('files', file));
+            formData.append('period_code', periodCode);
+
+            const response = await fetch('/batch_upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || '批量處理失敗');
+            }
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'renamed_pdfs.zip';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+
+            showAlert(`✅ 已處理 ${files.length} 個檔案並打包下載`, 'success');
+            uploadedFiles = [];
+            updateFileList();
+        }
+    </script>
+</body>
+</html>

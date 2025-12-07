@@ -1,0 +1,4 @@
+# PDF重命名工具 - 最小部署依賴 (Vercel)
+Flask>=2.3.0
+PyMuPDF>=1.23.0
+Werkzeug>=2.3.0
