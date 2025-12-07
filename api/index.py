@@ -1,290 +1,441 @@
-from flask import Flask, request, send_file, jsonify
-import os
-import tempfile
-import zipfile
-from werkzeug.utils import secure_filename
+from flask import Flask, request, jsonify, render_template_string
+from pypdf import PdfReader
+import io
 import re
-import traceback
-
-# 安全導入 PyMuPDF
-fitz = None
-startup_error = None
-try:
-    import fitz
-except Exception as e:
-    # 捕捉所有錯誤 (包括 OSError, ImportError 等)
-    startup_error = f"{type(e).__name__}: {str(e)}"
+import os
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 4.5 * 1024 * 1024
 
-class HSBCRenamer:
-    def __init__(self):
-        self.pattern = re.compile(r"(\d{10,})\s*/\s*([A-Z]{3})\s*-?\s*([A-Z0-9]+)")
-    
-    def extract_info(self, pdf_path):
-        if not fitz: return None
-        try:
-            doc = fitz.open(pdf_path)
-            text = "".join([doc.load_page(i).get_text() for i in range(min(3, len(doc)))])
-            doc.close()
-            match = self.pattern.search(text)
-            if match:
-                return {'outlet_num': match.group(1), 'bene_abbr': match.group(2), 'outlet_code': match.group(3)}
-            return None
-        except:
-            return None
-    
-    def generate_filename(self, info, period_code):
-        from datetime import datetime
-        year = datetime.now().strftime("%y")
-        period = period_code.upper().replace('P', '')
-        return f"{year}_P{period}_{info['bene_abbr']}_{info['outlet_code']}_{info['outlet_num']}.pdf"
-
-@app.route("/")
-def index():
-    # 如果啟動時有錯誤，顯示警告
-    warning_html = ""
-    if startup_error:
-        warning_html = f"""
-        <div style="background:#f8d7da;color:#721c24;padding:15px;margin-bottom:20px;border-radius:8px;border:1px solid #f5c6cb;">
-            <strong>⚠️ 系統警告:</strong> PDF 處理庫加載失敗。<br>
-            錯誤詳情: <code>{startup_error}</code><br>
-            <small>請檢查 requirements.txt 是否包含 PyMuPDF</small>
-        </div>
-        """
-
-    return f"""<!DOCTYPE html>
-<html lang="zh-TW">
+# HTML Template with Client-Side Batching Logic
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HSBC 批量重命名工具</title>
+    <title>HSBC Payment Advice Renamer (Batch)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     <style>
-        body {{ font-family: -apple-system, sans-serif; background: #f0f2f5; padding: 20px; display: flex; justify-content: center; }}
-        .container {{ width: 100%; max-width: 600px; background: white; border-radius: 15px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
-        h1 {{ text-align: center; color: #1a1a1a; margin-bottom: 20px; }}
-        .control-group {{ margin-bottom: 20px; }}
-        label {{ font-weight: bold; display: block; margin-bottom: 5px; }}
-        input[type="text"] {{ width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }}
-        .btn-group {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }}
-        .btn {{ padding: 15px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.2s; color: white; text-align: center; }}
-        .btn-folder {{ background: #007bff; }}
-        .btn-zip {{ background: #28a745; }}
-        .btn:hover {{ opacity: 0.9; transform: scale(0.98); }}
-        .progress-area {{ margin-top: 20px; display: none; }}
-        .progress-bar {{ width: 100%; height: 10px; background: #eee; border-radius: 5px; overflow: hidden; }}
-        .progress-fill {{ height: 100%; background: #007bff; width: 0%; transition: width 0.3s; }}
-        .log {{ margin-top: 10px; font-size: 0.85em; color: #666; max-height: 150px; overflow-y: auto; border: 1px solid #eee; padding: 10px; border-radius: 5px; }}
-        .hidden-input {{ display: none; }}
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }
+        .container { background: #f9f9f9; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-bottom: 1.5rem; }
+        .upload-area { border: 2px dashed #ccc; padding: 2rem; text-align: center; background: white; border-radius: 4px; margin-bottom: 1rem; }
+        .form-group { margin-bottom: 1rem; text-align: left; }
+        label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
+        input[type="text"] { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #0070f3; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #status { margin-top: 1rem; padding: 1rem; border-radius: 4px; display: none; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        #log { margin-top: 1rem; font-family: monospace; font-size: 0.9rem; white-space: pre-wrap; background: #eee; padding: 1rem; max-height: 300px; overflow-y: auto; display: none; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🚀 HSBC 批量重命名</h1>
-        {warning_html}
+        <h1>HSBC Payment Advice Renamer</h1>
         
-        <div class="control-group">
-            <label>期間代碼 (Period Code)</label>
-            <input type="text" id="code" value="P8" placeholder="例如: P8">
+        <div class="form-group">
+            <label for="periodCode">Period Code (e.g., P5):</label>
+            <input type="text" id="periodCode" value="P1" placeholder="Enter Period Code">
         </div>
 
-        <div class="btn-group">
-            <button class="btn btn-folder" onclick="document.getElementById('folderInput').click()">
-                📂 選擇資料夾 / 多檔<br><small>(推薦! 無大小限制)</small>
-            </button>
-            <button class="btn btn-zip" onclick="document.getElementById('zipInput').click()">
-                📦 上傳 ZIP 檔<br><small>(限 4.5MB 以下)</small>
-            </button>
+        <div class="upload-area">
+            <p>Select a folder containing PDF files:</p>
+            <input type="file" id="fileInput" webkitdirectory directory multiple accept=".pdf">
+            <br><br>
+            <button id="processBtn" onclick="processFiles()">Process & Download ZIP</button>
         </div>
 
-        <input type="file" id="folderInput" class="hidden-input" webkitdirectory multiple accept=".pdf" onchange="handleFolder(this)">
-        <input type="file" id="zipInput" class="hidden-input" accept=".zip" onchange="handleZip(this)">
-
-        <div id="progressArea" class="progress-area">
-            <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
-                <span id="statusText">準備中...</span>
-                <span id="percentText">0%</span>
-            </div>
-            <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
-            <div id="log" class="log"></div>
-        </div>
+        <div id="status"></div>
+        <div id="log"></div>
     </div>
 
     <script>
-        const logDiv = document.getElementById('log');
-        const progressArea = document.getElementById('progressArea');
-        const progressFill = document.getElementById('progressFill');
-        
-        function log(msg, color='black') {{
-            logDiv.innerHTML += `<div style="color:${{color}}">${{msg}}</div>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
-        }}
+        function log(msg) {
+            const logDiv = document.getElementById('log');
+            logDiv.style.display = 'block';
+            logDiv.innerText += msg + '\\n';
+            console.log(msg);
+        }
 
-        function resetUI() {{
-            progressArea.style.display = 'block';
-            logDiv.innerHTML = '';
-            progressFill.style.width = '0%';
-            document.getElementById('percentText').innerText = '0%';
-        }}
+        async function processFiles() {
+            const fileInput = document.getElementById('fileInput');
+            const periodCode = document.getElementById('periodCode').value || 'P1';
+            const statusDiv = document.getElementById('status');
+            const btn = document.getElementById('processBtn');
 
-        async function handleFolder(input) {{
-            if (!input.files.length) return;
-            resetUI();
-            
-            const files = Array.from(input.files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
-            if (files.length === 0) {{
-                log("❌ 沒有找到 PDF 檔案", "red");
+            if (fileInput.files.length === 0) {
+                alert("Please select a folder first.");
                 return;
-            }}
+            }
 
-            log(`📦 準備處理 ${{files.length}} 個檔案...`);
+            btn.disabled = true;
+            statusDiv.style.display = 'block';
+            statusDiv.className = '';
+            statusDiv.innerText = 'Processing ' + fileInput.files.length + ' files...';
+            document.getElementById('log').innerText = ''; // Clear log
+
             const zip = new JSZip();
-            const periodCode = document.getElementById('code').value;
-            let successCount = 0;
+            let processedCount = 0;
+            let errorCount = 0;
 
-            for (let i = 0; i < files.length; i++) {{
-                const file = files[i];
-                document.getElementById('statusText').innerText = `正在處理 (${{i+1}}/${{files.length}}): ${{file.name}}`;
-                
-                try {{
+            try {
+                for (let i = 0; i < fileInput.files.length; i++) {
+                    const file = fileInput.files[i];
+                    
+                    // Skip non-PDFs
+                    if (!file.name.toLowerCase().endsWith('.pdf')) {
+                        continue;
+                    }
+
+                    log(`Processing [${i+1}/${fileInput.files.length}]: ${file.name}...`);
+
                     const formData = new FormData();
                     formData.append('file', file);
                     formData.append('period_code', periodCode);
 
-                    const res = await fetch('/process_one', {{ method: 'POST', body: formData }});
-                    
-                    if (res.ok) {{
-                        const blob = await res.blob();
-                        const disposition = res.headers.get('Content-Disposition');
-                        let newName = file.name;
-                        if (disposition && disposition.includes('filename=')) {{
-                            newName = disposition.split('filename=')[1].replace(/"/g, '');
-                        }}
-                        
-                        zip.file(newName, blob);
-                        log(`✅ 成功: ${{file.name}} -> ${{newName}}`, "green");
-                        successCount++;
-                    }} else {{
-                        log(`⚠️ 失敗: ${{file.name}} (無法解析)`, "orange");
-                        zip.file(`ERROR_${{file.name}}`, file);
-                    }}
-                }} catch (e) {{
-                    log(`❌ 錯誤: ${{file.name}} (${{e.message}})`, "red");
-                }}
+                    try {
+                        const response = await fetch('/process_one', {
+                            method: 'POST',
+                            body: formData
+                        });
 
-                const percent = Math.round(((i + 1) / files.length) * 100);
-                progressFill.style.width = `${{percent}}%`;
-                document.getElementById('percentText').innerText = `${{percent}}%`;
-            }}
+                        if (!response.ok) {
+                            const errText = await response.text();
+                            throw new Error(`Server error: ${response.status} - ${errText}`);
+                        }
 
-            if (successCount > 0) {{
-                document.getElementById('statusText').innerText = "正在打包下載...";
-                const content = await zip.generateAsync({{type:"blob"}});
-                saveAs(content, `renamed_files_${{periodCode}}.zip`);
-                log("🎉 全部完成！已自動下載 ZIP。", "blue");
-            }} else {{
-                document.getElementById('statusText').innerText = "處理完成，但沒有成功檔案";
-            }}
-        }}
+                        const data = await response.json();
+                        if (data.error) {
+                            throw new Error(data.error);
+                        }
 
-        async function handleZip(input) {{
-            const file = input.files[0];
-            if (!file) return;
-            
-            if (file.size > 4.5 * 1024 * 1024) {{
-                alert("❌ ZIP 檔案超過 4.5MB 限制！\\n請改用「選擇資料夾」按鈕，它支援無限大小。");
-                input.value = '';
-                return;
-            }}
+                        // Add renamed file to zip
+                        zip.file(data.new_name, file);
+                        log(`  -> Renamed to: ${data.new_name}`);
+                        processedCount++;
 
-            resetUI();
-            log("📤 正在上傳 ZIP 處理...", "blue");
-            document.getElementById('statusText').innerText = "伺服器處理中...";
-            progressFill.style.width = "50%";
+                    } catch (err) {
+                        log(`  -> ERROR: ${err.message}`);
+                        errorCount++;
+                        zip.file("UNPROCESSED_" + file.name, file);
+                    }
+                }
 
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('period_code', document.getElementById('code').value);
+                if (processedCount === 0 && errorCount > 0) {
+                    throw new Error("All files failed to process. Check the log for details.");
+                }
 
-            try {{
-                const res = await fetch('/process_zip', {{ method: 'POST', body: formData }});
-                if (res.ok) {{
-                    const blob = await res.blob();
-                    saveAs(blob, `renamed_zip_result.zip`);
-                    progressFill.style.width = "100%";
-                    document.getElementById('percentText').innerText = "100%";
-                    log("✅ 伺服器處理完成，已下載。", "green");
-                }} else {{
-                    const err = await res.json();
-                    log(`❌ 伺服器錯誤: ${{err.error}}`, "red");
-                }}
-            }} catch (e) {{
-                log(`❌ 網絡錯誤: ${{e.message}}`, "red");
-            }}
-        }}
+                statusDiv.innerText = 'Generating ZIP file...';
+                const content = await zip.generateAsync({type: "blob"});
+                saveAs(content, `renamed_invoices_${periodCode}.zip`);
+
+                statusDiv.className = 'success';
+                statusDiv.innerText = `Done! Processed: ${processedCount}, Errors: ${errorCount}. ZIP downloaded.`;
+
+            } catch (e) {
+                statusDiv.className = 'error';
+                statusDiv.innerText = 'Error: ' + e.message;
+                alert("An error occurred: " + e.message);
+            } finally {
+                btn.disabled = false;
+            }
+        }
     </script>
 </body>
-</html>"""
+</html>
+"""
 
-@app.route("/process_one", methods=["POST"])
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/process_one', methods=['POST'])
 def process_one():
-    if "file" not in request.files: return jsonify({"error": "No file"}), 400
-    f = request.files["file"]
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        f.save(tmp.name)
-        path = tmp.name
-
     try:
-        renamer = HSBCRenamer()
-        info = renamer.extract_info(path)
-        if not info:
-            os.unlink(path)
-            return jsonify({"error": "Parse failed"}), 400
-            
-        period_code = request.form.get("period_code", "P1")
-        if not period_code.startswith('P'): period_code = f"P{period_code}"
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part"}), 400
         
-        new_name = renamer.generate_filename(info, period_code)
-        return send_file(path, as_attachment=True, download_name=secure_filename(new_name), mimetype="application/pdf")
-    except Exception as e:
-        if os.path.exists(path): os.unlink(path)
-        return jsonify({"error": str(e)}), 500
+        file = request.files['file']
+        period_code = request.form.get('period_code', 'P1')
+        
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
 
-@app.route("/process_zip", methods=["POST"])
-def process_zip():
-    if "file" not in request.files: return jsonify({"error": "No file"}), 400
-    f = request.files["file"]
-    
-    period_code = request.form.get("period_code", "P1")
-    if not period_code.startswith('P'): period_code = f"P{period_code}"
-    
-    renamer = HSBCRenamer()
-    
-    try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            zip_path = os.path.join(temp_dir, "upload.zip")
-            f.save(zip_path)
+        # Read PDF using pypdf
+        try:
+            # Create a copy of the stream for pypdf
+            file_stream = io.BytesIO(file.read())
+            reader = PdfReader(file_stream)
             
-            output_zip_path = os.path.join(temp_dir, "output.zip")
+            if len(reader.pages) == 0:
+                return jsonify({"error": "Empty PDF"}), 400
+                
+            text = reader.pages[0].extract_text()
             
-            with zipfile.ZipFile(zip_path, 'r') as z_in, zipfile.ZipFile(output_zip_path, 'w') as z_out:
-                for item in z_in.infolist():
-                    if item.filename.endswith('.pdf'):
-                        z_in.extract(item, temp_dir)
-                        pdf_path = os.path.join(temp_dir, item.filename)
-                        
-                        info = renamer.extract_info(pdf_path)
-                        if info:
-                            new_name = renamer.generate_filename(info, period_code)
-                            z_out.write(pdf_path, secure_filename(new_name))
-                        else:
-                            z_out.write(pdf_path, f"ERROR_{os.path.basename(item.filename)}")
-            
-            return send_file(output_zip_path, as_attachment=True, download_name=f"renamed_{period_code}.zip", mimetype="application/zip")
-            
+        except Exception as e:
+            return jsonify({"error": f"Failed to read PDF: {str(e)}"}), 500
+
+        # Extraction Logic (Regex)
+        extracted_info = {}
+        
+        # 1. Extract Year
+        # Look for "Advice sending date" followed by date
+        date_match = re.search(r"Advice sending date.*?(\d{1,2}\s+\w{3}\s+(\d{4}))", text, re.DOTALL | re.IGNORECASE)
+        if date_match:
+            year_short = date_match.group(2)[-2:]
+            extracted_info['year'] = year_short
+        else:
+            # Fallback: Try to find just a date pattern if the label is missing/garbled
+            # 20 Jun 2025
+            fallback_date = re.search(r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})", text, re.IGNORECASE)
+            if fallback_date:
+                extracted_info['year'] = fallback_date.group(1)[-2:]
+            else:
+                return jsonify({"error": "Could not find date in PDF"}), 400
+
+        # 2. Extract Outlet Info
+        # Pattern: 1208008138/ APC-IT801
+        outlet_match = re.search(r"(\d{10,})\s*/\s*([A-Z]{3})\s*-?\s*([A-Z0-9]+)", text)
+        if outlet_match:
+            extracted_info['outlet_num'] = outlet_match.group(1)
+            extracted_info['bene_abbr'] = outlet_match.group(2)
+            extracted_info['outlet_code'] = outlet_match.group(3)
+        else:
+            return jsonify({"error": "Could not find Outlet/Bene info pattern"}), 400
+
+        # Generate New Filename
+        new_filename = (
+            f"{extracted_info['year']}_"
+            f"{period_code}_"
+            f"{extracted_info['bene_abbr']}_"
+            f"{extracted_info['outlet_code']}_"
+            f"{extracted_info['outlet_num']}.pdf"
+        )
+
+        return jsonify({"new_name": new_filename})
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Server Error: {str(from flask import Flask, request, jsonify, render_template_string
+from pypdf import PdfReader
+import io
+import re
+import os
+
+app = Flask(__name__)
+
+# HTML Template with Client-Side Batching Logic
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HSBC Payment Advice Renamer (Batch)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }
+        .container { background: #f9f9f9; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-bottom: 1.5rem; }
+        .upload-area { border: 2px dashed #ccc; padding: 2rem; text-align: center; background: white; border-radius: 4px; margin-bottom: 1rem; }
+        .form-group { margin-bottom: 1rem; text-align: left; }
+        label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
+        input[type="text"] { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #0070f3; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #status { margin-top: 1rem; padding: 1rem; border-radius: 4px; display: none; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        #log { margin-top: 1rem; font-family: monospace; font-size: 0.9rem; white-space: pre-wrap; background: #eee; padding: 1rem; max-height: 300px; overflow-y: auto; display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>HSBC Payment Advice Renamer</h1>
+        
+        <div class="form-group">
+            <label for="periodCode">Period Code (e.g., P5):</label>
+            <input type="text" id="periodCode" value="P1" placeholder="Enter Period Code">
+        </div>
+
+        <div class="upload-area">
+            <p>Select a folder containing PDF files:</p>
+            <input type="file" id="fileInput" webkitdirectory directory multiple accept=".pdf">
+            <br><br>
+            <button id="processBtn" onclick="processFiles()">Process & Download ZIP</button>
+        </div>
+
+        <div id="status"></div>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        function log(msg) {
+            const logDiv = document.getElementById('log');
+            logDiv.style.display = 'block';
+            logDiv.innerText += msg + '\\n';
+            console.log(msg);
+        }
+
+        async function processFiles() {
+            const fileInput = document.getElementById('fileInput');
+            const periodCode = document.getElementById('periodCode').value || 'P1';
+            const statusDiv = document.getElementById('status');
+            const btn = document.getElementById('processBtn');
+
+            if (fileInput.files.length === 0) {
+                alert("Please select a folder first.");
+                return;
+            }
+
+            btn.disabled = true;
+            statusDiv.style.display = 'block';
+            statusDiv.className = '';
+            statusDiv.innerText = 'Processing ' + fileInput.files.length + ' files...';
+            document.getElementById('log').innerText = ''; // Clear log
+
+            const zip = new JSZip();
+            let processedCount = 0;
+            let errorCount = 0;
+
+            try {
+                for (let i = 0; i < fileInput.files.length; i++) {
+                    const file = fileInput.files[i];
+                    
+                    // Skip non-PDFs
+                    if (!file.name.toLowerCase().endsWith('.pdf')) {
+                        continue;
+                    }
+
+                    log(`Processing [${i+1}/${fileInput.files.length}]: ${file.name}...`);
+
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('period_code', periodCode);
+
+                    try {
+                        const response = await fetch('/process_one', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (!response.ok) {
+                            const errText = await response.text();
+                            throw new Error(`Server error: ${response.status} - ${errText}`);
+                        }
+
+                        const data = await response.json();
+                        if (data.error) {
+                            throw new Error(data.error);
+                        }
+
+                        // Add renamed file to zip
+                        zip.file(data.new_name, file);
+                        log(`  -> Renamed to: ${data.new_name}`);
+                        processedCount++;
+
+                    } catch (err) {
+                        log(`  -> ERROR: ${err.message}`);
+                        errorCount++;
+                        zip.file("UNPROCESSED_" + file.name, file);
+                    }
+                }
+
+                if (processedCount === 0 && errorCount > 0) {
+                    throw new Error("All files failed to process. Check the log for details.");
+                }
+
+                statusDiv.innerText = 'Generating ZIP file...';
+                const content = await zip.generateAsync({type: "blob"});
+                saveAs(content, `renamed_invoices_${periodCode}.zip`);
+
+                statusDiv.className = 'success';
+                statusDiv.innerText = `Done! Processed: ${processedCount}, Errors: ${errorCount}. ZIP downloaded.`;
+
+            } catch (e) {
+                statusDiv.className = 'error';
+                statusDiv.innerText = 'Error: ' + e.message;
+                alert("An error occurred: " + e.message);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/process_one', methods=['POST'])
+def process_one():
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part"}), 400
+        
+        file = request.files['file']
+        period_code = request.form.get('period_code', 'P1')
+        
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+
+        # Read PDF using pypdf
+        try:
+            # Create a copy of the stream for pypdf
+            file_stream = io.BytesIO(file.read())
+            reader = PdfReader(file_stream)
+            
+            if len(reader.pages) == 0:
+                return jsonify({"error": "Empty PDF"}), 400
+                
+            text = reader.pages[0].extract_text()
+            
+        except Exception as e:
+            return jsonify({"error": f"Failed to read PDF: {str(e)}"}), 500
+
+        # Extraction Logic (Regex)
+        extracted_info = {}
+        
+        # 1. Extract Year
+        # Look for "Advice sending date" followed by date
+        date_match = re.search(r"Advice sending date.*?(\d{1,2}\s+\w{3}\s+(\d{4}))", text, re.DOTALL | re.IGNORECASE)
+        if date_match:
+            year_short = date_match.group(2)[-2:]
+            extracted_info['year'] = year_short
+        else:
+            # Fallback: Try to find just a date pattern if the label is missing/garbled
+            # 20 Jun 2025
+            fallback_date = re.search(r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})", text, re.IGNORECASE)
+            if fallback_date:
+                extracted_info['year'] = fallback_date.group(1)[-2:]
+            else:
+                return jsonify({"error": "Could not find date in PDF"}), 400
+
+        # 2. Extract Outlet Info
+        # Pattern: 1208008138/ APC-IT801
+        outlet_match = re.search(r"(\d{10,})\s*/\s*([A-Z]{3})\s*-?\s*([A-Z0-9]+)", text)
+        if outlet_match:
+            extracted_info['outlet_num'] = outlet_match.group(1)
+            extracted_info['bene_abbr'] = outlet_match.group(2)
+            extracted_info['outlet_code'] = outlet_match.group(3)
+        else:
+            return jsonify({"error": "Could not find Outlet/Bene info pattern"}), 400
+
+        # Generate New Filename
+        new_filename = (
+            f"{extracted_info['year']}_"
+            f"{period_code}_"
+            f"{extracted_info['bene_abbr']}_"
+            f"{extracted_info['outlet_code']}_"
+            f"{extracted_info['outlet_num']}.pdf"
+        )
+
+        return jsonify({"new_name": new_filename})
+
+    except Exception as e:
+        return jsonify({"error": f"Server Error: {str(
