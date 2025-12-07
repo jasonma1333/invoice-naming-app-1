@@ -4,15 +4,18 @@ import tempfile
 import zipfile
 from werkzeug.utils import secure_filename
 import re
-import io
+import traceback
 
+# 安全導入 PyMuPDF
+fitz = None
+startup_error = None
 try:
     import fitz
-except ImportError:
-    fitz = None
+except Exception as e:
+    # 捕捉所有錯誤 (包括 OSError, ImportError 等)
+    startup_error = f"{type(e).__name__}: {str(e)}"
 
 app = Flask(__name__)
-# Vercel 限制單次請求 4.5MB
 app.config['MAX_CONTENT_LENGTH'] = 4.5 * 1024 * 1024
 
 class HSBCRenamer:
@@ -40,36 +43,48 @@ class HSBCRenamer:
 
 @app.route("/")
 def index():
-    return """<!DOCTYPE html>
+    # 如果啟動時有錯誤，顯示警告
+    warning_html = ""
+    if startup_error:
+        warning_html = f"""
+        <div style="background:#f8d7da;color:#721c24;padding:15px;margin-bottom:20px;border-radius:8px;border:1px solid #f5c6cb;">
+            <strong>⚠️ 系統警告:</strong> PDF 處理庫加載失敗。<br>
+            錯誤詳情: <code>{startup_error}</code><br>
+            <small>請檢查 requirements.txt 是否包含 PyMuPDF</small>
+        </div>
+        """
+
+    return f"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HSBC 超級重命名工具</title>
+    <title>HSBC 批量重命名工具</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     <style>
-        body { font-family: -apple-system, sans-serif; background: #f0f2f5; padding: 20px; display: flex; justify-content: center; }
-        .container { width: 100%; max-width: 600px; background: white; border-radius: 15px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #1a1a1a; margin-bottom: 20px; }
-        .control-group { margin-bottom: 20px; }
-        label { font-weight: bold; display: block; margin-bottom: 5px; }
-        input[type="text"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-        .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
-        .btn { padding: 15px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.2s; color: white; text-align: center; }
-        .btn-folder { background: #007bff; }
-        .btn-zip { background: #28a745; }
-        .btn:hover { opacity: 0.9; transform: scale(0.98); }
-        .progress-area { margin-top: 20px; display: none; }
-        .progress-bar { width: 100%; height: 10px; background: #eee; border-radius: 5px; overflow: hidden; }
-        .progress-fill { height: 100%; background: #007bff; width: 0%; transition: width 0.3s; }
-        .log { margin-top: 10px; font-size: 0.85em; color: #666; max-height: 150px; overflow-y: auto; border: 1px solid #eee; padding: 10px; border-radius: 5px; }
-        .hidden-input { display: none; }
+        body {{ font-family: -apple-system, sans-serif; background: #f0f2f5; padding: 20px; display: flex; justify-content: center; }}
+        .container {{ width: 100%; max-width: 600px; background: white; border-radius: 15px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+        h1 {{ text-align: center; color: #1a1a1a; margin-bottom: 20px; }}
+        .control-group {{ margin-bottom: 20px; }}
+        label {{ font-weight: bold; display: block; margin-bottom: 5px; }}
+        input[type="text"] {{ width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }}
+        .btn-group {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }}
+        .btn {{ padding: 15px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.2s; color: white; text-align: center; }}
+        .btn-folder {{ background: #007bff; }}
+        .btn-zip {{ background: #28a745; }}
+        .btn:hover {{ opacity: 0.9; transform: scale(0.98); }}
+        .progress-area {{ margin-top: 20px; display: none; }}
+        .progress-bar {{ width: 100%; height: 10px; background: #eee; border-radius: 5px; overflow: hidden; }}
+        .progress-fill {{ height: 100%; background: #007bff; width: 0%; transition: width 0.3s; }}
+        .log {{ margin-top: 10px; font-size: 0.85em; color: #666; max-height: 150px; overflow-y: auto; border: 1px solid #eee; padding: 10px; border-radius: 5px; }}
+        .hidden-input {{ display: none; }}
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🚀 HSBC 批量重命名</h1>
+        {warning_html}
         
         <div class="control-group">
             <label>期間代碼 (Period Code)</label>
@@ -85,7 +100,6 @@ def index():
             </button>
         </div>
 
-        <!-- webkitdirectory 允許選擇資料夾 -->
         <input type="file" id="folderInput" class="hidden-input" webkitdirectory multiple accept=".pdf" onchange="handleFolder(this)">
         <input type="file" id="zipInput" class="hidden-input" accept=".zip" onchange="handleZip(this)">
 
@@ -104,93 +118,87 @@ def index():
         const progressArea = document.getElementById('progressArea');
         const progressFill = document.getElementById('progressFill');
         
-        function log(msg, color='black') {
-            logDiv.innerHTML += `<div style="color:${color}">${msg}</div>`;
+        function log(msg, color='black') {{
+            logDiv.innerHTML += `<div style="color:${{color}}">${{msg}}</div>`;
             logDiv.scrollTop = logDiv.scrollHeight;
-        }
+        }}
 
-        function resetUI() {
+        function resetUI() {{
             progressArea.style.display = 'block';
             logDiv.innerHTML = '';
             progressFill.style.width = '0%';
             document.getElementById('percentText').innerText = '0%';
-        }
+        }}
 
-        // 處理資料夾/多檔 (Client-Side Batching)
-        async function handleFolder(input) {
+        async function handleFolder(input) {{
             if (!input.files.length) return;
             resetUI();
             
             const files = Array.from(input.files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
-            if (files.length === 0) {
+            if (files.length === 0) {{
                 log("❌ 沒有找到 PDF 檔案", "red");
                 return;
-            }
+            }}
 
-            log(`📦 準備處理 ${files.length} 個檔案...`);
+            log(`📦 準備處理 ${{files.length}} 個檔案...`);
             const zip = new JSZip();
             const periodCode = document.getElementById('code').value;
             let successCount = 0;
 
-            for (let i = 0; i < files.length; i++) {
+            for (let i = 0; i < files.length; i++) {{
                 const file = files[i];
-                document.getElementById('statusText').innerText = `正在處理 (${i+1}/${files.length}): ${file.name}`;
+                document.getElementById('statusText').innerText = `正在處理 (${{i+1}}/${{files.length}}): ${{file.name}}`;
                 
-                try {
+                try {{
                     const formData = new FormData();
                     formData.append('file', file);
                     formData.append('period_code', periodCode);
 
-                    // 一個一個傳送，避免超過 Vercel 限制
-                    const res = await fetch('/process_one', { method: 'POST', body: formData });
+                    const res = await fetch('/process_one', {{ method: 'POST', body: formData }});
                     
-                    if (res.ok) {
+                    if (res.ok) {{
                         const blob = await res.blob();
-                        // 從 header 獲取新檔名
                         const disposition = res.headers.get('Content-Disposition');
-                        let newName = file.name; // fallback
-                        if (disposition && disposition.includes('filename=')) {
+                        let newName = file.name;
+                        if (disposition && disposition.includes('filename=')) {{
                             newName = disposition.split('filename=')[1].replace(/"/g, '');
-                        }
+                        }}
                         
                         zip.file(newName, blob);
-                        log(`✅ 成功: ${file.name} -> ${newName}`, "green");
+                        log(`✅ 成功: ${{file.name}} -> ${{newName}}`, "green");
                         successCount++;
-                    } else {
-                        log(`⚠️ 失敗: ${file.name} (無法解析)`, "orange");
-                        // 失敗的檔案也放進去，但用原名加前綴
-                        zip.file(`ERROR_${file.name}`, file);
-                    }
-                } catch (e) {
-                    log(`❌ 錯誤: ${file.name} (${e.message})`, "red");
-                }
+                    }} else {{
+                        log(`⚠️ 失敗: ${{file.name}} (無法解析)`, "orange");
+                        zip.file(`ERROR_${{file.name}}`, file);
+                    }}
+                }} catch (e) {{
+                    log(`❌ 錯誤: ${{file.name}} (${{e.message}})`, "red");
+                }}
 
-                // 更新進度條
                 const percent = Math.round(((i + 1) / files.length) * 100);
-                progressFill.style.width = `${percent}%`;
-                document.getElementById('percentText').innerText = `${percent}%`;
-            }
+                progressFill.style.width = `${{percent}}%`;
+                document.getElementById('percentText').innerText = `${{percent}}%`;
+            }}
 
-            if (successCount > 0) {
+            if (successCount > 0) {{
                 document.getElementById('statusText').innerText = "正在打包下載...";
-                const content = await zip.generateAsync({type:"blob"});
-                saveAs(content, `renamed_files_${periodCode}.zip`);
+                const content = await zip.generateAsync({{type:"blob"}});
+                saveAs(content, `renamed_files_${{periodCode}}.zip`);
                 log("🎉 全部完成！已自動下載 ZIP。", "blue");
-            } else {
+            }} else {{
                 document.getElementById('statusText').innerText = "處理完成，但沒有成功檔案";
-            }
-        }
+            }}
+        }}
 
-        // 處理 ZIP 上傳 (Server-Side)
-        async function handleZip(input) {
+        async function handleZip(input) {{
             const file = input.files[0];
             if (!file) return;
             
-            if (file.size > 4.5 * 1024 * 1024) {
-                alert("❌ ZIP 檔案超過 4.5MB 限制！\n請改用「選擇資料夾」按鈕，它支援無限大小。");
+            if (file.size > 4.5 * 1024 * 1024) {{
+                alert("❌ ZIP 檔案超過 4.5MB 限制！\\n請改用「選擇資料夾」按鈕，它支援無限大小。");
                 input.value = '';
                 return;
-            }
+            }}
 
             resetUI();
             log("📤 正在上傳 ZIP 處理...", "blue");
@@ -201,29 +209,28 @@ def index():
             formData.append('file', file);
             formData.append('period_code', document.getElementById('code').value);
 
-            try {
-                const res = await fetch('/process_zip', { method: 'POST', body: formData });
-                if (res.ok) {
+            try {{
+                const res = await fetch('/process_zip', {{ method: 'POST', body: formData }});
+                if (res.ok) {{
                     const blob = await res.blob();
                     saveAs(blob, `renamed_zip_result.zip`);
                     progressFill.style.width = "100%";
                     document.getElementById('percentText').innerText = "100%";
                     log("✅ 伺服器處理完成，已下載。", "green");
-                } else {
+                }} else {{
                     const err = await res.json();
-                    log(`❌ 伺服器錯誤: ${err.error}`, "red");
-                }
-            } catch (e) {
-                log(`❌ 網絡錯誤: ${e.message}`, "red");
-            }
-        }
+                    log(`❌ 伺服器錯誤: ${{err.error}}`, "red");
+                }}
+            }} catch (e) {{
+                log(`❌ 網絡錯誤: ${{e.message}}`, "red");
+            }}
+        }}
     </script>
 </body>
 </html>"""
 
 @app.route("/process_one", methods=["POST"])
 def process_one():
-    """處理單個檔案 (供前端迴圈調用)"""
     if "file" not in request.files: return jsonify({"error": "No file"}), 400
     f = request.files["file"]
     
@@ -249,7 +256,6 @@ def process_one():
 
 @app.route("/process_zip", methods=["POST"])
 def process_zip():
-    """處理 ZIP 檔案 (受 4.5MB 限制)"""
     if "file" not in request.files: return jsonify({"error": "No file"}), 400
     f = request.files["file"]
     
@@ -268,11 +274,9 @@ def process_zip():
             with zipfile.ZipFile(zip_path, 'r') as z_in, zipfile.ZipFile(output_zip_path, 'w') as z_out:
                 for item in z_in.infolist():
                     if item.filename.endswith('.pdf'):
-                        # 解壓
                         z_in.extract(item, temp_dir)
                         pdf_path = os.path.join(temp_dir, item.filename)
                         
-                        # 處理
                         info = renamer.extract_info(pdf_path)
                         if info:
                             new_name = renamer.generate_filename(info, period_code)
